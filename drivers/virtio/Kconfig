@@ -135,6 +135,13 @@ config VIRTIO_MEM
 
 	 If unsure, say M.
 
+config VIRTIO_ISM
+	tristate "Virtio ISM driver"
+	depends on VIRTIO
+	default m
+	help
+          TODO
+
 config VIRTIO_INPUT
 	tristate "Virtio input driver"
 	depends on VIRTIO
