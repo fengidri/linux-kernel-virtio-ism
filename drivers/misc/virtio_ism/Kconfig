@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIRTIO_ISM
+	tristate "Virtio ISM"
+	depends on VIRTIO
+	default m
+	help
+	 This module provides some interfaces for manipulating virtio-ism
+	 devices.
+
+	 If unsure, say M.
+
