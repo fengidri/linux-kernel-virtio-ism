@@ -130,6 +130,9 @@ static int vp_request_msix_vectors(struct virtio_device *vdev, int nvectors,
 		desc->pre_vectors++; /* virtio config vector */
 	}
 
+	if (vdev->nvec)
+		nvectors = vdev->nvec;
+
 	err = pci_alloc_irq_vectors_affinity(vp_dev->pci_dev, nvectors,
 					     nvectors, flags, desc);
 	if (err < 0)
@@ -280,6 +283,14 @@ void vp_del_vqs(struct virtio_device *vdev)
 	kfree(vp_dev->vqs);
 	vp_dev->vqs = NULL;
 }
+
+int vp_irq(struct virtio_device *vdev, int vec)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	return pci_irq_vector(vp_dev->pci_dev, vec);
+}
+EXPORT_SYMBOL_GPL(vp_irq);
+
 
 static int vp_find_vqs_msix(struct virtio_device *vdev, unsigned int nvqs,
 		struct virtqueue *vqs[], vq_callback_t *callbacks[],
