@@ -135,6 +135,16 @@ config VIRTIO_MEM
 
 	 If unsure, say M.
 
+config VIRTIO_ISM
+	tristate "Virtio ISM"
+	depends on VIRTIO
+	default m
+	help
+	 This module provides some interfaces for manipulating virtio-ism
+	 devices.
+
+	 If unsure, say M.
+
 config VIRTIO_INPUT
 	tristate "Virtio input driver"
 	depends on VIRTIO
