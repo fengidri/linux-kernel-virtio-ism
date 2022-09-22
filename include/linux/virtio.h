@@ -125,6 +125,8 @@ struct virtio_device {
 	struct list_head vqs;
 	u64 features;
 	void *priv;
+
+	int nvec;
 };
 
 static inline struct virtio_device *dev_to_virtio(struct device *_dev)
@@ -206,4 +208,6 @@ void unregister_virtio_driver(struct virtio_driver *drv);
 #define module_virtio_driver(__virtio_driver) \
 	module_driver(__virtio_driver, register_virtio_driver, \
 			unregister_virtio_driver)
+
+int vp_irq(struct virtio_device *vdev, int vec);
 #endif /* _LINUX_VIRTIO_H */
