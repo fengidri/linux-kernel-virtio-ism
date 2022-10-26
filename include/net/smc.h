@@ -103,6 +103,7 @@ struct smcd_dev {
 	wait_queue_head_t lgrs_deleted;
 	u8 going_away : 1;
 	u8 shmem : 1; /* indicate ISM device */
+	int max_dmbs;
 };
 
 struct smcd_dev *smcd_alloc_dev(struct device *parent, const char *name,
@@ -112,4 +113,5 @@ void smcd_unregister_dev(struct smcd_dev *smcd);
 void smcd_free_dev(struct smcd_dev *smcd);
 void smcd_handle_event(struct smcd_dev *dev, struct smcd_event *event);
 void smcd_handle_irq(struct smcd_dev *dev, unsigned int bit, u16 dmbemask);
+void smcd_handle_irq_dmb(struct smcd_dev *dev, struct smcd_dmb *dmb);
 #endif	/* _SMC_H */

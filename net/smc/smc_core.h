@@ -197,6 +197,10 @@ struct smc_buf_desc {
 					/* DMB token number */
 			dma_addr_t	dma_addr;
 					/* DMA address */
+			struct smcd_dmb dmb;
+					/* SMC-D allocated data */
+			struct smc_connection *conn;
+					/* SMC connection pointer */
 		};
 	};
 };
