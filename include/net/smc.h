@@ -30,14 +30,15 @@ void smc_unhash_sk(struct sock *sk);
 
 /* SMCD/ISM device driver interface */
 struct smcd_dmb {
-	u64 dmb_tok;
-	u64 rgid;
-	u32 dmb_len;
-	u32 sba_idx;
-	u32 vlan_valid;
-	u32 vlan_id;
-	void *cpu_addr;
-	dma_addr_t dma_addr;
+	u64		dmb_tok;
+	u64		rgid;
+	u32		dmb_len;
+	u32		sba_idx;
+	u32		vlan_valid;
+	u32		vlan_id;
+	void		*cpu_addr;
+	dma_addr_t	dma_addr;
+	struct smcd_dev *dev;
 };
 
 #define ISM_EVENT_DMB	0
@@ -74,6 +75,14 @@ struct smcd_ops {
 			 unsigned int size);
 	u8* (*get_system_eid)(void);
 	u16 (*get_chid)(struct smcd_dev *dev);
+
+	/* introduce new operations to replace old register/unregister_dmb
+	 * operations */
+	int (*alloc_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*free_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*attach_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*detach_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*notify_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
 };
 
 struct smcd_dev {
@@ -93,6 +102,7 @@ struct smcd_dev {
 	atomic_t lgr_cnt;
 	wait_queue_head_t lgrs_deleted;
 	u8 going_away : 1;
+	u8 shmem : 1; /* indicate ISM device */
 };
 
 struct smcd_dev *smcd_alloc_dev(struct device *parent, const char *name,
