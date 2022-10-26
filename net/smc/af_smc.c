@@ -1356,6 +1356,9 @@ static int smc_connect_ism(struct smc_sock *smc,
 		return rc;
 	}
 
+	/* save necessary info for buf allocating and attaching */
+	smc_conn_save_peer_info(smc, aclc);
+
 	/* Create send and receive buffers */
 	rc = smc_buf_create(smc, true);
 	if (rc) {
@@ -1363,7 +1366,6 @@ static int smc_connect_ism(struct smc_sock *smc,
 		goto connect_abort;
 	}
 
-	smc_conn_save_peer_info(smc, aclc);
 	smc_close_init(smc);
 	smc_rx_init(smc);
 	smc_tx_init(smc);
@@ -2000,9 +2002,13 @@ static int smc_listen_ism_init(struct smc_sock *new_smc,
 	rc = smc_conn_create(new_smc, ini);
 	if (rc)
 		return rc;
+	if (ini->ism_dev[0]->shmem)
+		/* Create receive buffers first and prepare to send token to peer. */
+		rc = __smc_buf_create(new_smc, true, true);
+	else
+		/* Create send and receive buffers */
+		rc = smc_buf_create(new_smc, true);
 
-	/* Create send and receive buffers */
-	rc = smc_buf_create(new_smc, true);
 	if (rc) {
 		smc_conn_abort(new_smc, ini->first_contact_local);
 		return (rc == -ENOSPC) ? SMC_CLC_DECL_MAX_DMB :
@@ -2313,6 +2319,25 @@ static int smc_listen_rdma_finish(struct smc_sock *new_smc,
 	return reason_code;
 }
 
+/* listen worker: finish ISM shmem setup */
+static int smc_listen_ism_shmem_finish(struct smc_sock *new_smc)
+{
+	int reason_code = 0;
+	int rc;
+
+	/* attach peer-allcated buffer */
+	rc = __smc_buf_create(new_smc, true, false);
+	if (rc) {
+		/* reuse this fallback reason cdoe, actully ISM doesn't have
+		 * rtoken.
+		 */
+		reason_code = SMC_CLC_DECL_ERR_RTOK;
+		return reason_code;
+	}
+
+	return reason_code;
+}
+
 /* setup for connection of server */
 static void smc_listen_work(struct work_struct *work)
 {
@@ -2411,6 +2436,9 @@ static void smc_listen_work(struct work_struct *work)
 		goto out_decl;
 	}
 
+	/* save necessary info for buf allocating and attaching */
+	smc_conn_save_peer_info(new_smc, cclc);
+
 	/* finish worker */
 	if (!ini->is_smcd) {
 		rc = smc_listen_rdma_finish(new_smc, cclc,
@@ -2418,8 +2446,11 @@ static void smc_listen_work(struct work_struct *work)
 		if (rc)
 			goto out_unlock;
 		mutex_unlock(&smc_server_lgr_pending);
+	} else if (new_smc->conn.lgr->is_smcd) {
+		rc = smc_listen_ism_shmem_finish(new_smc);
+		if (rc)
+			goto out_decl;
 	}
-	smc_conn_save_peer_info(new_smc, cclc);
 	smc_listen_out_connected(new_smc);
 	SMC_STAT_SERV_SUCC_INC(sock_net(newclcsock->sk), ini);
 	goto out_free;

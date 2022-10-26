@@ -2341,7 +2341,7 @@ static struct smc_buf_desc *smcd_new_buf_create(struct smc_connection *conn,
 	return buf_desc;
 }
 
-static int __smc_buf_create(struct smc_sock *smc, bool is_smcd, bool is_rmb)
+int __smc_buf_create(struct smc_sock *smc, bool is_smcd, bool is_rmb)
 {
 	struct smc_buf_desc *buf_desc = ERR_PTR(-ENOMEM);
 	struct smc_connection *conn = &smc->conn;
