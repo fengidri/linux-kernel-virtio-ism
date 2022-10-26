@@ -74,6 +74,14 @@ struct smcd_ops {
 			 unsigned int size);
 	u8* (*get_system_eid)(void);
 	u16 (*get_chid)(struct smcd_dev *dev);
+
+	/* introduce new operations to replace old register/unregister_dmb
+	 * operations */
+	int (*alloc_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*free_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*attach_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*detach_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
+	int (*notify_dmb)(struct smcd_dev *dev, struct smcd_dmb *dmb);
 };
 
 struct smcd_dev {
@@ -93,6 +101,7 @@ struct smcd_dev {
 	atomic_t lgr_cnt;
 	wait_queue_head_t lgrs_deleted;
 	u8 going_away : 1;
+	u8 shmem : 1; /* indicate ISM device */
 };
 
 struct smcd_dev *smcd_alloc_dev(struct device *parent, const char *name,
