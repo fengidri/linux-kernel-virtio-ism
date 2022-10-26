@@ -1128,6 +1128,9 @@ static void smcr_buf_unuse(struct smc_buf_desc *buf_desc, bool is_rmb,
 static void smc_buf_unuse(struct smc_connection *conn,
 			  struct smc_link_group *lgr)
 {
+	if (lgr->smcd->shmem)
+		return;
+
 	if (conn->sndbuf_desc) {
 		if (!lgr->is_smcd && conn->sndbuf_desc->is_vm) {
 			smcr_buf_unuse(conn->sndbuf_desc, false, lgr);
@@ -1307,11 +1310,22 @@ static void smcd_buf_free(struct smc_link_group *lgr, bool is_dmb,
 			  struct smc_buf_desc *buf_desc)
 {
 	if (is_dmb) {
-		/* restore original buf len */
-		buf_desc->len += sizeof(struct smcd_cdc_msg);
-		smc_ism_unregister_dmb(lgr->smcd, buf_desc);
+		if (lgr->smcd->shmem) {
+			smc_ism_detach_dmb(lgr->smcd, buf_desc);
+			smc_ism_free_dmb(lgr->smcd, buf_desc);
+		} else {
+			/* restore original buf len */
+			buf_desc->len += sizeof(struct smcd_cdc_msg);
+			smc_ism_unregister_dmb(lgr->smcd, buf_desc);
+		}
 	} else {
-		kfree(buf_desc->cpu_addr);
+		if (lgr->smcd->shmem)
+			/* we don't have the ownership of sndbuf, it is
+			 * allocated by peer.
+			 */
+			smc_ism_detach_dmb(lgr->smcd, buf_desc);
+		else
+			kfree(buf_desc->cpu_addr);
 	}
 	kfree(buf_desc);
 }
@@ -1946,8 +1960,8 @@ out:
 	return rc;
 }
 
-#define SMCD_DMBE_SIZES		6 /* 0 -> 16KB, 1 -> 32KB, .. 6 -> 1MB */
-#define SMCR_RMBE_SIZES		5 /* 0 -> 16KB, 1 -> 32KB, .. 5 -> 512KB */
+#define SMCD_DMBE_SIZES		7 /* 0 -> 16KB, 1 -> 32KB, .. 7 -> 2MB */
+#define SMCR_RMBE_SIZES		7 /* 0 -> 16KB, 1 -> 32KB, .. 7 -> 2MB */
 
 /* convert the RMB size into the compressed notation (minimum 16K, see
  * SMCD/R_DMBE_SIZES.
@@ -2262,9 +2276,10 @@ out:
 	return rc;
 }
 
-static struct smc_buf_desc *smcd_new_buf_create(struct smc_link_group *lgr,
+static struct smc_buf_desc *smcd_new_buf_create(struct smc_connection *conn,
 						bool is_dmb, int bufsize)
 {
+	struct smc_link_group *lgr = conn->lgr;
 	struct smc_buf_desc *buf_desc;
 	int rc;
 
@@ -2273,27 +2288,53 @@ static struct smc_buf_desc *smcd_new_buf_create(struct smc_link_group *lgr,
 	if (!buf_desc)
 		return ERR_PTR(-ENOMEM);
 	if (is_dmb) {
-		rc = smc_ism_register_dmb(lgr, bufsize, buf_desc);
-		if (rc) {
-			kfree(buf_desc);
-			if (rc == -ENOMEM)
-				return ERR_PTR(-EAGAIN);
-			if (rc == -ENOSPC)
-				return ERR_PTR(-ENOSPC);
-			return ERR_PTR(-EIO);
+		if (lgr->smcd->shmem) {
+			/* the receive buffer is owned by ourself, so we have to
+			 * allocate it now, then attach it.
+			 */
+			rc = smc_ism_alloc_dmb(lgr->smcd, bufsize, buf_desc);
+			if (rc) {
+				kfree(buf_desc);
+				if (rc == -ENOMEM)
+					return ERR_PTR(-EAGAIN);
+				if (rc == -ENOSPC)
+					return ERR_PTR(-ENOSPC);
+				return ERR_PTR(-EIO);
+			}
+			buf_desc->len -= sizeof(struct smcd_cdc_msg);
+		} else {
+			rc = smc_ism_register_dmb(lgr, bufsize, buf_desc);
+			if (rc) {
+				kfree(buf_desc);
+				if (rc == -ENOMEM)
+					return ERR_PTR(-EAGAIN);
+				if (rc == -ENOSPC)
+					return ERR_PTR(-ENOSPC);
+				return ERR_PTR(-EIO);
+			}
+			buf_desc->pages = virt_to_page(buf_desc->cpu_addr);
+			/* CDC header stored in buf. So, pretend it was smaller */
+			buf_desc->len = bufsize - sizeof(struct smcd_cdc_msg);
 		}
-		buf_desc->pages = virt_to_page(buf_desc->cpu_addr);
-		/* CDC header stored in buf. So, pretend it was smaller */
-		buf_desc->len = bufsize - sizeof(struct smcd_cdc_msg);
 	} else {
-		buf_desc->cpu_addr = kzalloc(bufsize, GFP_KERNEL |
-					     __GFP_NOWARN | __GFP_NORETRY |
-					     __GFP_NOMEMALLOC);
-		if (!buf_desc->cpu_addr) {
-			kfree(buf_desc);
-			return ERR_PTR(-EAGAIN);
+		if (lgr->smcd->shmem) {
+			buf_desc->token = conn->peer_token;
+			/* attach sndbuf which is allocated by peer */
+			rc = smc_ism_attach_dmb(lgr->smcd, buf_desc);
+			if (rc) {
+				kfree(buf_desc);
+				return ERR_PTR(-EIO);
+			}
+		} else {
+			buf_desc->cpu_addr = kzalloc(bufsize, GFP_KERNEL |
+						     __GFP_NOWARN | __GFP_NORETRY |
+						     __GFP_NOMEMALLOC);
+			if (!buf_desc->cpu_addr) {
+				kfree(buf_desc);
+				return ERR_PTR(-EAGAIN);
+			}
+			buf_desc->len = bufsize;
 		}
-		buf_desc->len = bufsize;
 	}
 	return buf_desc;
 }
@@ -2316,48 +2357,64 @@ static int __smc_buf_create(struct smc_sock *smc, bool is_smcd, bool is_rmb)
 		/* use socket send buffer size (w/o overhead) as start value */
 		sk_buf_size = smc->sk.sk_sndbuf;
 
-	for (bufsize_short = smc_compress_bufsize(sk_buf_size, is_smcd, is_rmb);
-	     bufsize_short >= 0; bufsize_short--) {
-		if (is_rmb) {
-			lock = &lgr->rmbs_lock;
-			buf_list = &lgr->rmbs[bufsize_short];
-		} else {
-			lock = &lgr->sndbufs_lock;
-			buf_list = &lgr->sndbufs[bufsize_short];
-		}
+	if (lgr->smcd->shmem) {
+		/* current implementation of virtio-ism only support fixed size
+		 * buffer.
+		 */
+		buf_desc = smcd_new_buf_create(conn, is_rmb, sk_buf_size);
+		/* use fixed size in PoC */
+		bufsize_short = smc_compress_bufsize(buf_desc->len, is_smcd,
+						     is_rmb);
 		bufsize = smc_uncompress_bufsize(bufsize_short);
-
-		/* check for reusable slot in the link group */
-		buf_desc = smc_buf_get_slot(bufsize_short, lock, buf_list);
-		if (buf_desc) {
-			buf_desc->is_dma_need_sync = 0;
-			SMC_STAT_RMB_SIZE(smc, is_smcd, is_rmb, bufsize);
-			SMC_STAT_BUF_REUSE(smc, is_smcd, is_rmb);
-			break; /* found reusable slot */
-		}
-
-		if (is_smcd)
-			buf_desc = smcd_new_buf_create(lgr, is_rmb, bufsize);
-		else
-			buf_desc = smcr_new_buf_create(lgr, is_rmb, bufsize);
-
-		if (PTR_ERR(buf_desc) == -ENOMEM)
-			break;
-		if (IS_ERR(buf_desc)) {
-			if (!is_dgraded) {
-				is_dgraded = true;
-				SMC_STAT_RMB_DOWNGRADED(smc, is_smcd, is_rmb);
+	} else {
+		for (bufsize_short = smc_compress_bufsize(sk_buf_size, is_smcd,
+							  is_rmb);
+		     bufsize_short >= 0; bufsize_short--) {
+			if (is_rmb) {
+				lock = &lgr->rmbs_lock;
+				buf_list = &lgr->rmbs[bufsize_short];
+			} else {
+				lock = &lgr->sndbufs_lock;
+				buf_list = &lgr->sndbufs[bufsize_short];
 			}
-			continue;
-		}
+			bufsize = smc_uncompress_bufsize(bufsize_short);
 
-		SMC_STAT_RMB_ALLOC(smc, is_smcd, is_rmb);
-		SMC_STAT_RMB_SIZE(smc, is_smcd, is_rmb, bufsize);
-		buf_desc->used = 1;
-		mutex_lock(lock);
-		list_add(&buf_desc->list, buf_list);
-		mutex_unlock(lock);
-		break; /* found */
+			/* check for reusable slot in the link group */
+			buf_desc = smc_buf_get_slot(bufsize_short, lock,
+						    buf_list);
+			if (buf_desc) {
+				buf_desc->is_dma_need_sync = 0;
+				SMC_STAT_RMB_SIZE(smc, is_smcd, is_rmb, bufsize);
+				SMC_STAT_BUF_REUSE(smc, is_smcd, is_rmb);
+				break; /* found reusable slot */
+			}
+
+			if (is_smcd)
+				buf_desc = smcd_new_buf_create(conn, is_rmb,
+							       bufsize);
+			else
+				buf_desc = smcr_new_buf_create(lgr, is_rmb,
+							       bufsize);
+
+			if (PTR_ERR(buf_desc) == -ENOMEM)
+				break;
+			if (IS_ERR(buf_desc)) {
+				if (!is_dgraded) {
+					is_dgraded = true;
+					SMC_STAT_RMB_DOWNGRADED(smc, is_smcd,
+								is_rmb);
+				}
+				continue;
+			}
+
+			SMC_STAT_RMB_ALLOC(smc, is_smcd, is_rmb);
+			SMC_STAT_RMB_SIZE(smc, is_smcd, is_rmb, bufsize);
+			buf_desc->used = 1;
+			mutex_lock(lock);
+			list_add(&buf_desc->list, buf_list);
+			mutex_unlock(lock);
+			break; /* found */
+		}
 	}
 
 	if (IS_ERR(buf_desc))
@@ -2370,6 +2427,7 @@ static int __smc_buf_create(struct smc_sock *smc, bool is_smcd, bool is_rmb)
 		}
 	}
 
+	buf_desc->conn = conn;
 	if (is_rmb) {
 		conn->rmb_desc = buf_desc;
 		conn->rmbe_size_short = bufsize_short;
