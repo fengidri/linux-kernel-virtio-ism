@@ -145,6 +145,17 @@ config VIRTIO_ISM
 
 	 If unsure, say M.
 
+config VIRTIO_ISM_SMC
+	tristate "Virtio ISM SMC adapter driver"
+	depends on VIRTIO
+	depends on VIRTIO_ISM
+	depends on SMC
+	default m
+	help
+	 This driver provides an adapter for SMC to support virtio-ism.
+
+	 If unsure, say M.
+
 config VIRTIO_INPUT
 	tristate "Virtio input driver"
 	depends on VIRTIO
