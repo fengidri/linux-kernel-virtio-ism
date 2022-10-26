@@ -202,6 +202,82 @@ int smc_ism_register_dmb(struct smc_link_group *lgr, int dmb_len,
 	return rc;
 }
 
+int smc_ism_free_dmb(struct smcd_dev *dev, struct smc_buf_desc *dmb_desc)
+{
+	struct smcd_dmb dmb;
+
+	if (!dmb_desc->token)
+		return -EINVAL;
+
+	memset(&dmb, 0, sizeof(dmb));
+	dmb.dmb_tok = dmb_desc->token;
+	return dev->ops->free_dmb(dev, &dmb);
+}
+
+int smc_ism_detach_dmb(struct smcd_dev *dev, struct smc_buf_desc *dmb_desc)
+{
+	struct smcd_dmb dmb;
+	int rc = 0;
+
+	if (!dmb_desc->token)
+		return -EINVAL;
+
+	memset(&dmb, 0, sizeof(dmb));
+	dmb.dmb_tok = dmb_desc->token;
+	rc = dev->ops->detach_dmb(dev, &dmb);
+	if (rc)
+		return rc;
+
+	dmb_desc->cpu_addr = NULL;
+	dmb_desc->dma_addr = 0;
+	return rc;
+}
+
+int smc_ism_alloc_dmb(struct smcd_dev *dev, int dmb_len,
+		      struct smc_buf_desc *dmb_desc)
+{
+	struct smcd_dmb dmb;
+	int rc;
+
+	memset(&dmb, 0, sizeof(dmb));
+	dmb.dmb_len = dmb_len;
+	rc = dev->ops->alloc_dmb(dev, &dmb);
+	if (rc)
+		return rc;
+
+	dmb_desc->token = dmb.dmb_tok;
+	dmb_desc->cpu_addr = dmb.cpu_addr;
+	dmb_desc->len = dmb.dmb_len;
+	return rc;
+}
+
+int smc_ism_attach_dmb(struct smcd_dev *dev, struct smc_buf_desc *dmb_desc)
+{
+	struct smcd_dmb dmb;
+	int rc;
+
+	memset(&dmb, 0, sizeof(dmb));
+	dmb.dmb_len = dmb_desc->len;
+	dmb.dmb_tok = dmb_desc->token;
+	rc = dev->ops->attach_dmb(dev, &dmb);
+	if (rc)
+		return rc;
+
+	dmb_desc->token = dmb.dmb_tok;
+	dmb_desc->cpu_addr = dmb.cpu_addr;
+	dmb_desc->len = dmb.dmb_len;
+	return rc;
+}
+
+int smc_ism_notify_dmb(struct smcd_dev *dev, struct smc_buf_desc *dmb_desc)
+{
+	struct smcd_dmb dmb;
+
+	memset(&dmb, 0, sizeof(dmb));
+	dmb.cpu_addr = dmb_desc->cpu_addr;
+	return dev->ops->attach_dmb(dev, &dmb);
+}
+
 static int smc_nl_handle_smcd_dev(struct smcd_dev *smcd,
 				  struct sk_buff *skb,
 				  struct netlink_callback *cb)
@@ -404,6 +480,7 @@ struct smcd_dev *smcd_alloc_dev(struct device *parent, const char *name,
 		return NULL;
 	}
 
+	smcd->max_dmbs = max_dmbs;
 	smcd->dev.parent = parent;
 	smcd->dev.release = smcd_release;
 	device_initialize(&smcd->dev);
@@ -526,6 +603,31 @@ void smcd_handle_irq(struct smcd_dev *smcd, unsigned int dmbno, u16 dmbemask)
 	spin_unlock_irqrestore(&smcd->lock, flags);
 }
 EXPORT_SYMBOL_GPL(smcd_handle_irq);
+
+void smcd_handle_irq_addr(struct smcd_dev *smcd, void *cpu_addr)
+{
+	struct smc_connection *conn = NULL;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&smcd->lock, flags);
+	for (i = 0; i < smcd->max_dmbs; i++) {
+		struct smc_connection *sc;
+
+		sc = smcd->conn[i];
+		if (!sc)
+			continue;
+
+		if (sc->rmb_desc->cpu_addr == cpu_addr) {
+			conn = sc;
+			break;
+		}
+	}
+	if (conn && !conn->killed)
+		tasklet_schedule(&conn->rx_tsklet);
+	spin_unlock_irqrestore(&smcd->lock, flags);
+}
+EXPORT_SYMBOL_GPL(smcd_handle_irq_addr);
 
 void __init smc_ism_init(void)
 {
