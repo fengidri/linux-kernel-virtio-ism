@@ -145,6 +145,16 @@ config VIRTIO_ISM
 
 	 If unsure, say M.
 
+config VIRTIO_ISM_DEV
+	tristate "Virtio ISM driver"
+	depends on VIRTIO
+	depends on VIRTIO_ISM
+	default m
+	help
+	 This driver allows users to use virtio-ism devices in user space
+
+	 If unsure, say M.
+
 config VIRTIO_ISM_SMC
 	tristate "Virtio ISM SMC adapter driver"
 	depends on VIRTIO

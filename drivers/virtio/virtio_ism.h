@@ -1,6 +1,8 @@
 #ifndef  __VIRTIO_ISM_H__
 #define __VIRTIO_ISM_H__
 
+#include <linux/ioctl.h>
+
 struct virtio_ism_config {
 	u64 gid;
 	u64 devid;
@@ -103,6 +105,17 @@ struct virtio_ism_irq_cb {
 	struct virtio_ism *ism;
 	void *notify_data;
 };
+
+struct virtio_ism_ioctl {
+	u64 size;
+	u64 token;
+};
+
+#define CMD(rw, nr) _IO##rw(0xAF, nr, struct virtio_ism_ioctl)
+
+#define VIRTIO_ISM_IOCTL_ALLOC        CMD(WR, 0)
+#define VIRTIO_ISM_IOCTL_ATTACH       CMD(R,  1)
+#define VIRTIO_ISM_IOCTL_NOTIFY       _IO(0xAF, 2)
 
 struct virtio_ism {
 	struct virtio_device *vdev;
