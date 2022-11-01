@@ -248,7 +248,7 @@ int smcd_cdc_msg_send(struct smc_connection *conn)
 	cdc.cons.count = curs.count;
 	cdc.cons.prod_flags = conn->local_tx_ctrl.prod_flags;
 	cdc.cons.conn_state_flags = conn->local_tx_ctrl.conn_state_flags;
-	rc = smcd_tx_ism_write(conn, &cdc, sizeof(cdc), 0, 1);
+	rc = smcd_tx_ism_write(conn, &cdc, sizeof(cdc), 0, 1, NULL);
 	if (rc)
 		return rc;
 	smc_curs_copy(&conn->rx_curs_confirmed, &curs, conn);

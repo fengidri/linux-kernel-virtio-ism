@@ -45,7 +45,8 @@ static void smc_tx_write_space(struct sock *sk)
 	struct socket_wq *wq;
 
 	/* similar to sk_stream_write_space */
-	if (atomic_read(&smc->conn.sndbuf_space) && sock) {
+	if (atomic_read(&smc->conn.sndbuf_space) &&
+	    atomic_read(&smc->conn.peer_rmbe_space) && sock) {
 		if (test_bit(SOCK_NOSPACE, &sock->flags))
 			SMC_STAT_RMB_TX_FULL(smc, !smc->conn.lnk);
 		clear_bit(SOCK_NOSPACE, &sock->flags);
@@ -109,7 +110,8 @@ static int smc_tx_wait(struct smc_sock *smc, int flags)
 			break;
 		}
 		sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
-		if (atomic_read(&conn->sndbuf_space) && !conn->urg_tx_pend)
+		if (atomic_read(&conn->sndbuf_space) &&
+		    atomic_read(&conn->peer_rmbe_space) && !conn->urg_tx_pend)
 			break; /* at least 1 byte of free & no urgent data */
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 		sk_wait_event(sk, &timeo,
@@ -117,6 +119,7 @@ static int smc_tx_wait(struct smc_sock *smc, int flags)
 			      (sk->sk_shutdown & SEND_SHUTDOWN) ||
 			      smc_cdc_rxed_any_close(conn) ||
 			      (atomic_read(&conn->sndbuf_space) &&
+			       atomic_read(&conn->peer_rmbe_space) &&
 			       !conn->urg_tx_pend),
 			      &wait);
 	}
@@ -188,8 +191,8 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 	struct sock *sk = &smc->sk;
 	char *sndbuf_base;
 	int tx_cnt_prep;
-	int writespace;
-	int rc, chunk;
+	int writespace, peerspace;
+	int rc = 0, chunk;
 
 	/* This should be in poll */
 	sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
@@ -222,7 +225,8 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 		if (msg->msg_flags & MSG_OOB)
 			conn->local_tx_ctrl.prod_flags.urg_data_pending = 1;
 
-		if (!atomic_read(&conn->sndbuf_space) || conn->urg_tx_pend) {
+		if (!atomic_read(&conn->sndbuf_space) ||
+		    !atomic_read(&conn->peer_rmbe_space) || conn->urg_tx_pend) {
 			if (send_done)
 				return send_done;
 			rc = smc_tx_wait(smc, msg->msg_flags);
@@ -234,6 +238,8 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 		/* initialize variables for 1st iteration of subsequent loop */
 		/* could be just 1 byte, even after smc_tx_wait above */
 		writespace = atomic_read(&conn->sndbuf_space);
+		peerspace = atomic_read(&conn->peer_rmbe_space);
+		writespace = min_t(size_t, writespace, peerspace);
 		/* not more than what user space asked for */
 		copylen = min_t(size_t, send_remaining, writespace);
 		/* determine start of sndbuf */
@@ -247,13 +253,15 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 		chunk_len_sum = chunk_len;
 		chunk_off = tx_cnt_prep;
 		for (chunk = 0; chunk < 2; chunk++) {
-			rc = memcpy_from_msg(sndbuf_base + chunk_off,
-					     msg, chunk_len);
-			if (rc) {
-				smc_sndbuf_sync_sg_for_device(conn);
-				if (send_done)
-					return send_done;
-				goto out_err;
+			if (!(conn->lgr->is_smcd && conn->lgr->smcd->shmem)) {
+				rc = memcpy_from_msg(sndbuf_base + chunk_off,
+						     msg, chunk_len);
+				if (rc) {
+					smc_sndbuf_sync_sg_for_device(conn);
+					if (send_done)
+						return send_done;
+					goto out_err;
+				}
 			}
 			send_done += chunk_len;
 			send_remaining -= chunk_len;
@@ -283,7 +291,7 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 		 * sendmsg() call or push on tx completion
 		 */
 		if (!smc_tx_should_cork(smc, msg))
-			smc_tx_sndbuf_nonempty(conn);
+			smc_tx_sndbuf_nonempty(conn, msg);
 
 		trace_smc_tx_sendmsg(smc, copylen);
 	} /* while (msg_data_left(msg)) */
@@ -318,15 +326,31 @@ int smc_tx_sendpage(struct smc_sock *smc, struct page *page, int offset,
 
 /* sndbuf consumer: actual data transfer of one target chunk with ISM write */
 int smcd_tx_ism_write(struct smc_connection *conn, void *data, size_t len,
-		      u32 offset, int signal)
+		      u32 offset, int signal, struct msghdr *msg)
 {
-	int rc;
+	struct smc_buf_desc *dmb = conn->sndbuf_desc;
+	struct smcd_dev *dev = conn->lgr->smcd;
+	int rc = 0;
 
-	rc = smc_ism_write(conn->lgr->smcd, conn->peer_token,
-			   conn->peer_rmbe_idx, signal, conn->tx_off + offset,
-			   data, len);
+	if (dev->shmem) {
+		if (signal) {
+			memcpy(dmb->cpu_addr, data, len);
+			smc_ism_notify_dmb(dev, dmb);
+			return rc;
+		}
+
+		if (!msg)
+			return rc;
+
+		rc = memcpy_from_msg(dmb->cpu_addr + offset, msg, len);
+	} else {
+		rc = smc_ism_write(conn->lgr->smcd, conn->peer_token,
+				   conn->peer_rmbe_idx, signal,
+				   conn->tx_off + offset, data, len);
+	}
 	if (rc)
 		conn->local_tx_ctrl.conn_state_flags.peer_conn_abort = 1;
+
 	return rc;
 }
 
@@ -437,7 +461,8 @@ static int smcr_tx_rdma_writes(struct smc_connection *conn, size_t len,
 /* SMC-D helper for smc_tx_rdma_writes() */
 static int smcd_tx_rdma_writes(struct smc_connection *conn, size_t len,
 			       size_t src_off, size_t src_len,
-			       size_t dst_off, size_t dst_len)
+			       size_t dst_off, size_t dst_len,
+			       struct msghdr *msg)
 {
 	int src_len_sum = src_len, dst_len_sum = dst_len;
 	int srcchunk, dstchunk;
@@ -448,7 +473,8 @@ static int smcd_tx_rdma_writes(struct smc_connection *conn, size_t len,
 			void *data = conn->sndbuf_desc->cpu_addr + src_off;
 
 			rc = smcd_tx_ism_write(conn, data, src_len, dst_off +
-					       sizeof(struct smcd_cdc_msg), 0);
+					       sizeof(struct smcd_cdc_msg), 0,
+					       msg);
 			if (rc)
 				return rc;
 			dst_off += src_len;
@@ -478,7 +504,8 @@ static int smcd_tx_rdma_writes(struct smc_connection *conn, size_t len,
  * usable snd_wnd as max transmit
  */
 static int smc_tx_rdma_writes(struct smc_connection *conn,
-			      struct smc_rdma_wr *wr_rdma_buf)
+			      struct smc_rdma_wr *wr_rdma_buf,
+			      struct msghdr *msg)
 {
 	size_t len, src_len, dst_off, dst_len; /* current chunk values */
 	union smc_host_cursor sent, prep, prod, cons;
@@ -540,7 +567,7 @@ static int smc_tx_rdma_writes(struct smc_connection *conn,
 
 	if (conn->lgr->is_smcd)
 		rc = smcd_tx_rdma_writes(conn, len, sent.count, src_len,
-					 dst_off, dst_len);
+					 dst_off, dst_len, msg);
 	else
 		rc = smcr_tx_rdma_writes(conn, len, sent.count, src_len,
 					 dst_off, dst_len, wr_rdma_buf);
@@ -599,7 +626,7 @@ static int smcr_tx_sndbuf_nonempty(struct smc_connection *conn)
 		goto out_unlock;
 	}
 	if (!pflags->urg_data_present) {
-		rc = smc_tx_rdma_writes(conn, wr_rdma_buf);
+		rc = smc_tx_rdma_writes(conn, wr_rdma_buf, NULL);
 		if (rc) {
 			smc_wr_tx_put_slot(link,
 					   (struct smc_wr_tx_pend_priv *)pend);
@@ -619,14 +646,15 @@ out_unlock:
 	return rc;
 }
 
-static int smcd_tx_sndbuf_nonempty(struct smc_connection *conn)
+static int smcd_tx_sndbuf_nonempty(struct smc_connection *conn,
+				   struct msghdr *msg)
 {
 	struct smc_cdc_producer_flags *pflags = &conn->local_tx_ctrl.prod_flags;
 	int rc = 0;
 
 	spin_lock_bh(&conn->send_lock);
 	if (!pflags->urg_data_present)
-		rc = smc_tx_rdma_writes(conn, NULL);
+		rc = smc_tx_rdma_writes(conn, NULL, msg);
 	if (!rc)
 		rc = smcd_cdc_msg_send(conn);
 
@@ -638,7 +666,8 @@ static int smcd_tx_sndbuf_nonempty(struct smc_connection *conn)
 	return rc;
 }
 
-static int __smc_tx_sndbuf_nonempty(struct smc_connection *conn)
+static int __smc_tx_sndbuf_nonempty(struct smc_connection *conn,
+				    struct msghdr *msg)
 {
 	struct smc_sock *smc = container_of(conn, struct smc_sock, conn);
 	int rc = 0;
@@ -659,7 +688,7 @@ static int __smc_tx_sndbuf_nonempty(struct smc_connection *conn)
 		goto out;
 	}
 	if (conn->lgr->is_smcd)
-		rc = smcd_tx_sndbuf_nonempty(conn);
+		rc = smcd_tx_sndbuf_nonempty(conn, msg);
 	else
 		rc = smcr_tx_sndbuf_nonempty(conn);
 
@@ -672,7 +701,7 @@ out:
 	return rc;
 }
 
-int smc_tx_sndbuf_nonempty(struct smc_connection *conn)
+int smc_tx_sndbuf_nonempty(struct smc_connection *conn, struct msghdr *msg)
 {
 	int rc;
 
@@ -686,7 +715,7 @@ int smc_tx_sndbuf_nonempty(struct smc_connection *conn)
 again:
 	atomic_set(&conn->tx_pushing, 1);
 	smp_wmb(); /* Make sure tx_pushing is 1 before real send */
-	rc = __smc_tx_sndbuf_nonempty(conn);
+	rc = __smc_tx_sndbuf_nonempty(conn, msg);
 
 	/* We need to check whether someone else have added some data into
 	 * the send queue and tried to push but failed after the atomic_set()
@@ -709,10 +738,10 @@ void smc_tx_pending(struct smc_connection *conn)
 	struct smc_sock *smc = container_of(conn, struct smc_sock, conn);
 	int rc;
 
-	if (smc->sk.sk_err)
+	if (smc->sk.sk_err || conn->lgr->smcd->shmem)
 		return;
 
-	rc = smc_tx_sndbuf_nonempty(conn);
+	rc = smc_tx_sndbuf_nonempty(conn, NULL);
 	if (!rc && conn->local_rx_ctrl.prod_flags.write_blocked &&
 	    !atomic_read(&conn->bytes_to_rcv))
 		conn->local_rx_ctrl.prod_flags.write_blocked = 0;
