@@ -176,6 +176,101 @@ static bool smc_tx_should_cork(struct smc_sock *smc, struct msghdr *msg)
 	return false;
 }
 
+/* sndbuf consumer */
+static inline void smc_tx_advance_cursors(struct smc_connection *conn,
+					  union smc_host_cursor *prod,
+					  union smc_host_cursor *sent,
+					  size_t len)
+{
+	smc_curs_add(conn->peer_rmbe_size, prod, len);
+	/* increased in recv tasklet smc_cdc_msg_rcv() */
+	smp_mb__before_atomic();
+	/* data in flight reduces usable snd_wnd */
+	atomic_sub(len, &conn->peer_rmbe_space);
+	/* guarantee 0 <= peer_rmbe_space <= peer_rmbe_size */
+	smp_mb__after_atomic();
+	smc_curs_add(conn->sndbuf_desc->len, sent, len);
+}
+
+static int __smc_tx_copymsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
+{
+	size_t copylen, copy_done = 0, copy_remaining = len;
+	size_t chunk_len, chunk_off, chunk_len_sum;
+	struct smc_connection *conn = &smc->conn;
+	void *peer_rmbe_addr = conn->sndbuf_desc->cpu_addr;
+	union smc_host_cursor sent, prod;
+	struct sock *sk = &smc->sk;
+	int peer_rmbe_space;
+	int rc, chunk;
+
+	while (msg_data_left(msg)) {
+		if (smc->sk.sk_shutdown & SEND_SHUTDOWN ||
+		    (smc->sk.sk_err == ECONNABORTED) ||
+		    conn->killed)
+			return -EPIPE;
+		if (smc_cdc_rxed_any_close(conn))
+			return copy_done ?: -ECONNRESET;
+
+		if (msg->msg_flags & MSG_OOB)
+			conn->local_tx_ctrl.prod_flags.urg_data_pending = 1;
+
+		if (!atomic_read(&conn->peer_rmbe_space) || conn->urg_tx_pend) {
+			if (copy_done)
+				return copy_done;
+			rc = smc_tx_wait(smc, msg->msg_flags);
+			if (rc)
+				goto out_err;
+			continue;
+		}
+
+		peer_rmbe_space = atomic_read(&conn->peer_rmbe_space);
+		copylen = min_t(size_t, copy_remaining, peer_rmbe_space);
+
+		smc_curs_copy(&sent, &conn->tx_curs_sent, conn);
+		smc_curs_copy(&prod, &conn->local_tx_ctrl.prod, conn);
+
+		chunk_len = min_t(size_t, copylen, conn->sndbuf_desc->len -
+				  prod.count);
+		chunk_len_sum = chunk_len;
+		chunk_off = prod.count;
+
+		for (chunk = 0; chunk < 2; chunk++) {
+			rc = memcpy_from_msg(peer_rmbe_addr + chunk_off,
+					     msg, chunk_len);
+			if (rc) {
+				if (copy_done)
+					return copy_done;
+				goto out_err;
+			}
+			copy_done += chunk_len;
+			copy_remaining -= chunk_len;
+
+			if (chunk_len_sum == copylen)
+				break;
+			chunk_len = copylen - chunk_len;
+			chunk_len_sum += chunk_len;
+			chunk_off = 0;
+		}
+		smc_curs_add(conn->sndbuf_desc->len, &sent, copylen);
+		smc_curs_copy(&conn->tx_curs_sent, &sent, conn);
+		smp_mb__before_atomic();
+		atomic_sub(copylen, &conn->sndbuf_space);
+		smp_mb__after_atomic();
+
+		smc_tx_advance_cursors(conn, &prod, &sent, len);
+		smc_curs_copy(&conn->local_tx_ctrl.prod, &prod, conn);
+		smc_curs_copy(&conn->tx_curs_sent, &sent, conn);
+	}
+
+	return copy_done;
+
+out_err:
+	rc = sk_stream_error(sk, msg->msg_flags, rc);
+	if (unlikely(rc == -EAGAIN))
+		sk->sk_write_space(sk);
+	return rc;
+}
+
 /* sndbuf producer: main API called by socket layer.
  * called under sock lock.
  */
@@ -210,6 +305,9 @@ int smc_tx_sendmsg(struct smc_sock *smc, struct msghdr *msg, size_t len)
 
 	if (msg->msg_flags & MSG_OOB)
 		SMC_STAT_INC(smc, urg_data_cnt);
+
+	if (conn->lgr->smcd->shmem)
+		return __smc_tx_copymsg(smc, msg, len);
 
 	while (msg_data_left(msg)) {
 		if (smc->sk.sk_shutdown & SEND_SHUTDOWN ||
@@ -320,9 +418,20 @@ int smc_tx_sendpage(struct smc_sock *smc, struct page *page, int offset,
 int smcd_tx_ism_write(struct smc_connection *conn, void *data, size_t len,
 		      u32 offset, int signal)
 {
+	struct smc_buf_desc *dmb = conn->sndbuf_desc;
+	struct smcd_dev *dev = conn->lgr->smcd;
 	int rc;
 
-	rc = smc_ism_write(conn->lgr->smcd, conn->peer_token,
+	if (dev->shmem) {
+		/* for shmem mode, conn->tx_off and offset always be 0 */
+		if (signal) {
+			memcpy(dmb->cpu_addr, data, len);
+			smc_ism_notify_dmb(dev, dmb);
+		}
+		return 0;
+	}
+
+	rc = smc_ism_write(dev, conn->peer_token,
 			   conn->peer_rmbe_idx, signal, conn->tx_off + offset,
 			   data, len);
 	if (rc)
@@ -351,22 +460,6 @@ static int smc_tx_rdma_write(struct smc_connection *conn, int peer_rmbe_offset,
 	if (rc)
 		smcr_link_down_cond_sched(link);
 	return rc;
-}
-
-/* sndbuf consumer */
-static inline void smc_tx_advance_cursors(struct smc_connection *conn,
-					  union smc_host_cursor *prod,
-					  union smc_host_cursor *sent,
-					  size_t len)
-{
-	smc_curs_add(conn->peer_rmbe_size, prod, len);
-	/* increased in recv tasklet smc_cdc_msg_rcv() */
-	smp_mb__before_atomic();
-	/* data in flight reduces usable snd_wnd */
-	atomic_sub(len, &conn->peer_rmbe_space);
-	/* guarantee 0 <= peer_rmbe_space <= peer_rmbe_size */
-	smp_mb__after_atomic();
-	smc_curs_add(conn->sndbuf_desc->len, sent, len);
 }
 
 /* SMC-R helper for smc_tx_rdma_writes() */
