@@ -90,6 +90,8 @@ struct virtio_shm_region {
  *	Returns 0 on success or error status
  *	If disable_vq_and_reset is set, then enable_vq_after_reset must also be
  *	set.
+ * @vector_to_irq: get irq num from vector
+ *	vdev: the virtio_device
  */
 typedef void vq_callback_t(struct virtqueue *);
 struct virtio_config_ops {
@@ -118,6 +120,7 @@ struct virtio_config_ops {
 			       struct virtio_shm_region *region, u8 id);
 	int (*disable_vq_and_reset)(struct virtqueue *vq);
 	int (*enable_vq_after_reset)(struct virtqueue *vq);
+	int (*vector_to_irq)(struct virtio_device *, int vector);
 };
 
 /* If driver didn't advertise the feature, it will never appear. */
@@ -255,6 +258,17 @@ void virtio_synchronize_cbs(struct virtio_device *dev)
 		synchronize_rcu();
 	}
 }
+
+/**
+ * virtio_vector_to_irq - get irq num from vector
+ * @dev: the virtio device
+ */
+static inline
+int virtio_vector_to_irq(struct virtio_device *vdev, int vec)
+{
+	return vdev->config->vector_to_irq(vdev, vec);
+}
+
 
 /**
  * virtio_device_ready - enable vq use in probe function
