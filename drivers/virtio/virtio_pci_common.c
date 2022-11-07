@@ -287,15 +287,19 @@ int vp_irq(struct virtio_device *vdev, int vec)
 	return pci_irq_vector(vp_dev->pci_dev, vec);
 }
 
-static int vp_find_vqs_msix(struct virtio_device *vdev, unsigned int nvqs,
-		struct virtqueue *vqs[], vq_callback_t *callbacks[],
-		const char * const names[], bool per_vq_vectors,
-		const bool *ctx,
-		struct irq_affinity *desc)
+static int vp_find_vqs_msix(struct virtio_device *vdev,
+			    struct virtio_vqs_vectors *param,
+			    bool per_vq_vectors)
 {
-	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	u16 msix_vec;
 	int i, err, nvectors, allocated_vectors, queue_idx = 0;
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	vq_callback_t **callbacks = param->callbacks;
+	const char *const *names = param->names;
+	struct irq_affinity *desc = param->desc;
+	struct virtqueue **vqs = param->vqs;
+	unsigned int nvqs = param->nvqs;
+	const bool *ctx = param->ctx;
+	u16 msix_vec;
 
 	vp_dev->vqs = kcalloc(nvqs, sizeof(*vp_dev->vqs), GFP_KERNEL);
 	if (!vp_dev->vqs)
@@ -400,26 +404,25 @@ out_del_vqs:
 }
 
 /* the config->find_vqs() implementation */
-int vp_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
-		struct virtqueue *vqs[], vq_callback_t *callbacks[],
-		const char * const names[], const bool *ctx,
-		struct irq_affinity *desc)
+int vp_find_vqs(struct virtio_device *vdev,
+		struct virtio_vqs_vectors *param)
 {
 	int err;
 
 	/* Try MSI-X with one vector per queue. */
-	err = vp_find_vqs_msix(vdev, nvqs, vqs, callbacks, names, true, ctx, desc);
+	err = vp_find_vqs_msix(vdev, param, true);
 	if (!err)
 		return 0;
 	/* Fallback: MSI-X with one vector for config, one shared for queues. */
-	err = vp_find_vqs_msix(vdev, nvqs, vqs, callbacks, names, false, ctx, desc);
+	err = vp_find_vqs_msix(vdev, param, false);
 	if (!err)
 		return 0;
 	/* Is there an interrupt? If not give up. */
 	if (!(to_vp_device(vdev)->pci_dev->irq))
 		return err;
 	/* Finally fall back to regular interrupts. */
-	return vp_find_vqs_intx(vdev, nvqs, vqs, callbacks, names, ctx);
+	return vp_find_vqs_intx(vdev, param->nvqs, param->vqs,
+				param->callbacks, param->names, param->ctx);
 }
 
 const char *vp_bus_name(struct virtio_device *vdev)

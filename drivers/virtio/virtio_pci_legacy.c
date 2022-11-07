@@ -102,6 +102,23 @@ static void vp_reset(struct virtio_device *vdev)
 	vp_synchronize_vectors(vdev);
 }
 
+static int _vp_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+			struct virtqueue *vqs[], vq_callback_t *callbacks[],
+			const char * const names[], const bool *ctx,
+			struct irq_affinity *desc)
+{
+	struct virtio_vqs_vectors param = {};
+
+	param.nvqs = nvqs;
+	param.vqs = vqs;
+	param.callbacks = callbacks;
+	param.names = names;
+	param.ctx = ctx;
+	param.desc = desc;
+
+	return vp_find_vqs(vdev, &param);
+}
+
 static u16 vp_config_vector(struct virtio_pci_device *vp_dev, u16 vector)
 {
 	return vp_legacy_config_vector(&vp_dev->ldev, vector);
@@ -192,7 +209,7 @@ static const struct virtio_config_ops virtio_pci_config_ops = {
 	.get_status	= vp_get_status,
 	.set_status	= vp_set_status,
 	.reset		= vp_reset,
-	.find_vqs	= vp_find_vqs,
+	.find_vqs	= _vp_find_vqs,
 	.del_vqs	= vp_del_vqs,
 	.synchronize_cbs = vp_synchronize_vectors,
 	.get_features	= vp_get_features,
