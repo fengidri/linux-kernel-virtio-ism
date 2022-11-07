@@ -137,5 +137,6 @@ static inline void virtio_pci_legacy_remove(struct virtio_pci_device *vp_dev)
 #endif
 int virtio_pci_modern_probe(struct virtio_pci_device *);
 void virtio_pci_modern_remove(struct virtio_pci_device *);
+int vp_irq(struct virtio_device *vdev, int vec);
 
 #endif

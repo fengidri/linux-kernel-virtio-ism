@@ -281,6 +281,12 @@ void vp_del_vqs(struct virtio_device *vdev)
 	vp_dev->vqs = NULL;
 }
 
+int vp_irq(struct virtio_device *vdev, int vec)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	return pci_irq_vector(vp_dev->pci_dev, vec);
+}
+
 static int vp_find_vqs_msix(struct virtio_device *vdev, unsigned int nvqs,
 		struct virtqueue *vqs[], vq_callback_t *callbacks[],
 		const char * const names[], bool per_vq_vectors,
