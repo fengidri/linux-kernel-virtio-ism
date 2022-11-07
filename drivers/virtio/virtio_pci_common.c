@@ -100,13 +100,15 @@ static irqreturn_t vp_interrupt(int irq, void *opaque)
 }
 
 static int vp_request_msix_vectors(struct virtio_device *vdev, int nvectors,
-				   bool per_vq_vectors, struct irq_affinity *desc)
+				   bool per_vq_vectors,
+				   struct irq_affinity  *desc,
+				   struct virtio_vqs_vectors *param)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	const char *name = dev_name(&vp_dev->vdev.dev);
 	unsigned int flags = PCI_IRQ_MSIX;
 	unsigned int i, v;
-	int err = -ENOMEM;
+	int err = -ENOMEM, nvectors_max;
 
 	vp_dev->msix_vectors = nvectors;
 
@@ -130,10 +132,23 @@ static int vp_request_msix_vectors(struct virtio_device *vdev, int nvectors,
 		desc->pre_vectors++; /* virtio config vector */
 	}
 
+	nvectors_max = nvectors;
+	if (param->reserve_vectors > 0)
+		nvectors_max += param->reserve_vectors;
+
 	err = pci_alloc_irq_vectors_affinity(vp_dev->pci_dev, nvectors,
-					     nvectors, flags, desc);
+					     nvectors_max, flags, desc);
 	if (err < 0)
 		goto error;
+
+	if (err <= nvectors) {
+		param->reserve_vectors = -ENOSPC;
+	} else {
+		param->reserve_vectors = err - nvectors;
+		param->vector_start = nvectors;
+		param->vector_end = err - 1;
+	}
+
 	vp_dev->msix_enabled = 1;
 
 	/* Set the vector used for configuration */
@@ -317,7 +332,7 @@ static int vp_find_vqs_msix(struct virtio_device *vdev,
 	}
 
 	err = vp_request_msix_vectors(vdev, nvectors, per_vq_vectors,
-				      per_vq_vectors ? desc : NULL);
+				      per_vq_vectors ? desc : NULL, param);
 	if (err)
 		goto error_find;
 
@@ -413,6 +428,10 @@ int vp_find_vqs(struct virtio_device *vdev,
 	err = vp_find_vqs_msix(vdev, param, true);
 	if (!err)
 		return 0;
+
+	if (param->reserve_vectors > 0)
+		return -ENOSPC;
+
 	/* Fallback: MSI-X with one vector for config, one shared for queues. */
 	err = vp_find_vqs_msix(vdev, param, false);
 	if (!err)
