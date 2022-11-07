@@ -16,6 +16,16 @@ struct virtio_shm_region {
 	u64 len;
 };
 
+typedef void vq_callback_t(struct virtqueue *);
+struct virtio_vqs_vectors {
+	unsigned int          nvqs;
+	struct virtqueue     **vqs;
+	vq_callback_t        **callbacks;
+	const char           *const *names;
+	const bool           *ctx;
+	struct irq_affinity  *desc;
+};
+
 /**
  * virtio_config_ops - operations for configuring a virtio device
  * Note: Do not assume that a transport implements all of the operations
@@ -93,7 +103,6 @@ struct virtio_shm_region {
  * @vector_to_irq: get irq num from vector
  *	vdev: the virtio_device
  */
-typedef void vq_callback_t(struct virtqueue *);
 struct virtio_config_ops {
 	void (*get)(struct virtio_device *vdev, unsigned offset,
 		    void *buf, unsigned len);
