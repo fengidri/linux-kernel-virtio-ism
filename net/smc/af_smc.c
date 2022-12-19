@@ -52,6 +52,7 @@
 #include "smc_stats.h"
 #include "smc_tracepoint.h"
 #include "smc_sysctl.h"
+#include "smc_vism.h"
 
 static DEFINE_MUTEX(smc_server_lgr_pending);	/* serialize link group
 						 * creation on server
@@ -3407,10 +3408,16 @@ static int __init smc_init(void)
 	if (!smc_close_wq)
 		goto out_alloc_hs_wq;
 
+	rc = smc_vism_init();
+	if (rc) {
+		pr_err("%s: virtio-ism fails with %d\n", __func__, rc);
+		goto out_alloc_wqs;
+	}
+
 	rc = smc_core_init();
 	if (rc) {
 		pr_err("%s: smc_core_init fails with %d\n", __func__, rc);
-		goto out_alloc_wqs;
+		goto out_vism;
 	}
 
 	rc = smc_llc_init();
@@ -3470,6 +3477,8 @@ out_proto:
 	proto_unregister(&smc_proto);
 out_core:
 	smc_core_exit();
+out_vism:
+	smc_vism_exit();
 out_alloc_wqs:
 	destroy_workqueue(smc_close_wq);
 out_alloc_hs_wq:
@@ -3493,6 +3502,7 @@ static void __exit smc_exit(void)
 	sock_unregister(PF_SMC);
 	smc_core_exit();
 	smc_ib_unregister_client();
+	smc_vism_exit();
 	destroy_workqueue(smc_close_wq);
 	destroy_workqueue(smc_tcp_ls_wq);
 	destroy_workqueue(smc_hs_wq);
